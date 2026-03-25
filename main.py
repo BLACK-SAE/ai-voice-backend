@@ -1,18 +1,15 @@
 import io
 import os
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import edge_tts
 
 load_dotenv()
 
-app = FastAPI(title="AI Voice - ElevenLabs TTS API", version="2.0.0")
-
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
+app = FastAPI(title="AI Voice - Edge TTS API", version="2.0.0")
 
 # CORS - allow all origins (configure for production)
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")
@@ -24,38 +21,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Curated voices - clear and easy to understand
-VOICES = [
+# Curated Nigerian English voices
+NIGERIAN_VOICES = [
     {
-        "id": "EXAVITQu4vr4xnSDxMaL",
-        "name": "Sarah",
-        "gender": "Female",
-        "description": "Mature, Reassuring, Confident",
-    },
-    {
-        "id": "cjVigY5qzO86Huf0OWal",
-        "name": "Eric",
+        "id": "en-NG-AbeoNeural",
+        "name": "Abeo",
         "gender": "Male",
-        "description": "Smooth, Trustworthy",
+        "description": "Nigerian Male",
     },
     {
-        "id": "Xb7hH8MSUJpSbSDYk0k2",
-        "name": "Alice",
+        "id": "en-NG-EzinneNeural",
+        "name": "Ezinne",
         "gender": "Female",
-        "description": "Clear, Engaging Educator",
+        "description": "Nigerian Female",
+    },
+]
+
+# Additional clear English voices Nigerians can easily understand
+EXTRA_VOICES = [
+    {
+        "id": "en-US-GuyNeural",
+        "name": "Guy",
+        "gender": "Male",
+        "description": "American Male — Clear & Neutral",
     },
     {
-        "id": "onwK4e9ZLuTAKqWW03F9",
-        "name": "Daniel",
-        "gender": "Male",
-        "description": "Steady Broadcaster",
+        "id": "en-GB-SoniaNeural",
+        "name": "Sonia",
+        "gender": "Female",
+        "description": "British Female — Clear & Steady",
     },
 ]
 
 
 class SynthesizeRequest(BaseModel):
     text: str
-    voice_id: str = "EXAVITQu4vr4xnSDxMaL"  # Default: Sarah
+    voice_id: str = "en-NG-AbeoNeural"
     speed: float = 1.0  # 0.5 to 2.0
 
 
@@ -67,43 +68,31 @@ async def health():
 @app.get("/api/voices")
 async def list_voices():
     """Return curated voice list."""
-    return {"voices": VOICES}
+    return {"voices": NIGERIAN_VOICES + EXTRA_VOICES}
 
 
 @app.post("/api/synthesize")
 async def synthesize(req: SynthesizeRequest):
-    """Convert text to speech using ElevenLabs and return MP3 audio."""
+    """Convert text to speech using Edge-TTS and return MP3 audio."""
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(status_code=500, detail="ElevenLabs API key not configured")
-
     try:
-        url = f"{ELEVENLABS_BASE}/text-to-speech/{req.voice_id}"
-        headers = {
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
-        }
-        body = {
-            "text": req.text,
-            "model_id": "eleven_multilingual_v2",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.75,
-                "speed": req.speed,
-            },
-        }
+        # Convert speed float to edge-tts rate string
+        pct = round((req.speed - 1) * 100)
+        rate = f"+{pct}%" if pct >= 0 else f"{pct}%"
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, headers=headers, json=body)
+        communicate = edge_tts.Communicate(
+            text=req.text,
+            voice=req.voice_id,
+            rate=rate,
+        )
 
-        if response.status_code != 200:
-            detail = response.text
-            raise HTTPException(status_code=response.status_code, detail=detail)
+        audio_buffer = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_buffer.write(chunk["data"])
 
-        audio_buffer = io.BytesIO(response.content)
         audio_buffer.seek(0)
 
         return StreamingResponse(
@@ -113,8 +102,6 @@ async def synthesize(req: SynthesizeRequest):
                 "Content-Disposition": "attachment; filename=speech.mp3"
             },
         )
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
