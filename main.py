@@ -1,16 +1,18 @@
 import io
 import os
-import asyncio
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import edge_tts
 
 load_dotenv()
 
-app = FastAPI(title="AI Voice - Edge TTS API", version="1.0.0")
+app = FastAPI(title="AI Voice - ElevenLabs TTS API", version="2.0.0")
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 
 # CORS - allow all origins (configure for production)
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")
@@ -22,12 +24,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Curated voices - clear and easy to understand
+VOICES = [
+    {
+        "id": "EXAVITQu4vr4xnSDxMaL",
+        "name": "Sarah",
+        "gender": "Female",
+        "description": "Mature, Reassuring, Confident",
+    },
+    {
+        "id": "cjVigY5qzO86Huf0OWal",
+        "name": "Eric",
+        "gender": "Male",
+        "description": "Smooth, Trustworthy",
+    },
+    {
+        "id": "Xb7hH8MSUJpSbSDYk0k2",
+        "name": "Alice",
+        "gender": "Female",
+        "description": "Clear, Engaging Educator",
+    },
+    {
+        "id": "onwK4e9ZLuTAKqWW03F9",
+        "name": "Daniel",
+        "gender": "Male",
+        "description": "Steady Broadcaster",
+    },
+]
+
 
 class SynthesizeRequest(BaseModel):
     text: str
-    voice: str = "en-US-GuyNeural"
-    speed: str = "+0%"    # e.g. "+20%", "-10%"
-    pitch: str = "+0Hz"   # e.g. "+5Hz", "-10Hz"
+    voice_id: str = "EXAVITQu4vr4xnSDxMaL"  # Default: Sarah
+    speed: float = 1.0  # 0.5 to 2.0
 
 
 @app.get("/api/health")
@@ -35,63 +64,46 @@ async def health():
     return {"status": "ok"}
 
 
-ACCENT_LABELS = {
-    "en-US": "American",
-    "en-GB": "British",
-    "en-AU": "Australian",
-    "en-IN": "Indian",
-    "en-ZA": "South African",
-    "en-KE": "Kenyan",
-    "en-NG": "Nigerian",
-    "en-TZ": "Tanzanian",
-}
-
-
 @app.get("/api/voices")
 async def list_voices():
-    """List English-only Edge-TTS voices, grouped by accent."""
-    try:
-        voices_list = await edge_tts.list_voices()
-        grouped = {}
-        for v in voices_list:
-            locale = v["Locale"]
-            # Filter to English voices only
-            if not locale.startswith("en-"):
-                continue
-            label = ACCENT_LABELS.get(locale, locale)
-            if label not in grouped:
-                grouped[label] = []
-            grouped[label].append({
-                "name": v["ShortName"],
-                "locale": locale,
-                "gender": v["Gender"],
-                "friendlyName": v["FriendlyName"],
-            })
-        return {"voices": grouped}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Return curated voice list."""
+    return {"voices": VOICES}
 
 
 @app.post("/api/synthesize")
 async def synthesize(req: SynthesizeRequest):
-    """Convert text to speech and return MP3 audio."""
+    """Convert text to speech using ElevenLabs and return MP3 audio."""
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(status_code=500, detail="ElevenLabs API key not configured")
+
     try:
-        communicate = edge_tts.Communicate(
-            text=req.text,
-            voice=req.voice,
-            rate=req.speed,
-            pitch=req.pitch,
-        )
+        url = f"{ELEVENLABS_BASE}/text-to-speech/{req.voice_id}"
+        headers = {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        }
+        body = {
+            "text": req.text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "speed": req.speed,
+            },
+        }
 
-        # Collect audio data into a buffer
-        audio_buffer = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_buffer.write(chunk["data"])
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, headers=headers, json=body)
 
+        if response.status_code != 200:
+            detail = response.text
+            raise HTTPException(status_code=response.status_code, detail=detail)
+
+        audio_buffer = io.BytesIO(response.content)
         audio_buffer.seek(0)
 
         return StreamingResponse(
@@ -101,6 +113,8 @@ async def synthesize(req: SynthesizeRequest):
                 "Content-Disposition": "attachment; filename=speech.mp3"
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
